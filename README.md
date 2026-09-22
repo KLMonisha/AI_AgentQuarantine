@@ -153,7 +153,7 @@ Agent Jail creates a security boundary between what an agent reads and what an a
 
 Detect. Contain. Continue.
 
-#### AI-Assisted Development
+AI-Assisted Development
 
 AI tools were used throughout the development process as development and research assistants.
 
