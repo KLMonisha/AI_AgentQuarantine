@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -6,14 +7,14 @@ import urllib.request
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
-
+from telemetry import start_span
 
 load_dotenv()
 
 
 ENDPOINT = "https://llm.hidevs.xyz/v1/chat/completions"
 MODEL = "gemini-3.5-flash-lite"
-
+CACHE_FILE = "intent_cache.json"
 
 @dataclass
 class IntentAnalysis:
@@ -124,6 +125,29 @@ def _extract_json(text: str) -> dict:
 
     return json.loads(match.group(0))
 
+def _content_hash(content: str) -> str:
+    """Create a stable cache key from the analyzed content."""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _intent_from_data(data: dict) -> IntentAnalysis:
+    """Convert cached/model JSON into an IntentAnalysis object."""
+    return IntentAnalysis(
+        agent_directed=bool(data["agent_directed"]),
+        human_directed=not bool(data["agent_directed"]),
+        instruction_override=bool(data["instruction_override"]),
+        requests_privileged_action=bool(
+            data["requests_privileged_action"]
+        ),
+        sensitive_data_request=bool(
+            data["sensitive_data_request"]
+        ),
+        manipulates_agent_behavior=bool(
+            data["manipulates_agent_behavior"]
+        ),
+        confidence=float(data["confidence"]),
+        reason=str(data["reason"]),
+    )
 
 def analyze_intent(content: str) -> IntentAnalysis:
     """
@@ -132,7 +156,27 @@ def analyze_intent(content: str) -> IntentAnalysis:
     Gemini produces evidence only.
     It does NOT make the final security decision.
     """
+    cache_key = _content_hash(content)
 
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                cache = json.load(f)
+
+            if cache_key in cache:
+                with start_span("gemini.intent_analysis") as span:
+                    span.set_attribute("gemini.model", MODEL)
+                    span.set_attribute("gemini.cache_hit", True)
+                    span.set_attribute(
+                        "security.content_length",
+                        len(content),
+                    )
+
+                return _intent_from_data(cache[cache_key])
+
+        except (json.JSONDecodeError, OSError):
+            # Ignore a damaged/unreadable cache and use Gemini normally.
+            pass
     api_key = os.getenv("HIDEVS_API_KEY")
 
     if not api_key:
@@ -170,45 +214,111 @@ def analyze_intent(content: str) -> IntentAnalysis:
         method="POST",
     )
 
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            raw = response.read().decode("utf-8")
+    with start_span("gemini.intent_analysis") as span:
 
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode(
-            "utf-8",
-            errors="replace",
+        span.set_attribute(
+            "gemini.model",
+            MODEL,
         )
 
-        raise RuntimeError(
-            f"HiDevs Gemini API returned HTTP {e.code}: "
-            f"{error_body}"
-        ) from e
+        span.set_attribute(
+            "security.content_length",
+            len(content),
+        )
 
-    except urllib.error.URLError as e:
-        raise RuntimeError(
-            f"Could not reach HiDevs Gemini endpoint: {e}"
-        ) from e
+        try:
+            with urllib.request.urlopen(
+                request,
+                timeout=60,
+            ) as response:
+                raw = response.read().decode("utf-8")
 
-    result = json.loads(raw)
+        except urllib.error.HTTPError as e:
+            span.set_attribute(
+                "gemini.http_status",
+                e.code,
+            )
 
-    model_output = result["choices"][0]["message"]["content"]
+            error_body = e.read().decode(
+                "utf-8",
+                errors="replace",
+            )
 
-    data = _extract_json(model_output)
+            raise RuntimeError(
+                f"HiDevs Gemini API returned HTTP {e.code}: "
+                f"{error_body}"
+            ) from e
 
-    return IntentAnalysis(
-        agent_directed=bool(data["agent_directed"]),
-        human_directed=not bool(data["agent_directed"]),
-        instruction_override=bool(data["instruction_override"]),
-        requests_privileged_action=bool(
-            data["requests_privileged_action"]
-        ),
-        sensitive_data_request=bool(
-            data["sensitive_data_request"]
-        ),
-        manipulates_agent_behavior=bool(
-            data["manipulates_agent_behavior"]
-        ),
-        confidence=float(data["confidence"]),
-        reason=str(data["reason"]),
-    )
+        except urllib.error.URLError as e:
+            raise RuntimeError(
+                f"Could not reach HiDevs Gemini endpoint: {e}"
+            ) from e
+
+        result = json.loads(raw)
+
+        model_output = result["choices"][0]["message"]["content"]
+
+        data = _extract_json(model_output)
+
+        span.set_attribute(
+            "intent.agent_directed",
+            bool(data["agent_directed"]),
+        )
+
+        span.set_attribute(
+            "intent.instruction_override",
+            bool(data["instruction_override"]),
+        )
+
+        span.set_attribute(
+            "intent.privileged_action",
+            bool(data["requests_privileged_action"]),
+        )
+
+        span.set_attribute(
+            "intent.sensitive_data_request",
+            bool(data["sensitive_data_request"]),
+        )
+
+        span.set_attribute(
+            "intent.manipulates_agent",
+            bool(data["manipulates_agent_behavior"]),
+        )
+
+        span.set_attribute(
+            "intent.confidence",
+            float(data["confidence"]),
+        )
+
+    # Save successful Gemini analysis for deterministic demo replays.
+    try:
+        cache = {}
+
+        if os.path.exists(CACHE_FILE):
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                cache = json.load(f)
+
+        cache[cache_key] = {
+            "agent_directed": bool(data["agent_directed"]),
+            "instruction_override": bool(data["instruction_override"]),
+            "requests_privileged_action": bool(
+                data["requests_privileged_action"]
+            ),
+            "sensitive_data_request": bool(
+                data["sensitive_data_request"]
+            ),
+            "manipulates_agent_behavior": bool(
+                data["manipulates_agent_behavior"]
+            ),
+            "confidence": float(data["confidence"]),
+            "reason": str(data["reason"]),
+        }
+
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=2)
+
+    except OSError:
+        # Caching must never break the security pipeline.
+        pass
+
+    return _intent_from_data(data)

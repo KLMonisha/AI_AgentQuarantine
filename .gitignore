@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 credentials.json
 token.json
+intent_cache.json

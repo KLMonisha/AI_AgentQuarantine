@@ -15,7 +15,8 @@ from langchain_groq import ChatGroq
 from security_context import SecurityContext
 from threat_parser import parse_moss_results
 from livekit_events import publish_security_event
-
+from intent_analysis import analyze_intent
+from telemetry import start_span
 load_dotenv()
 
 def emit_live_event(event_type: str, data: dict):
@@ -88,138 +89,158 @@ def agent_jail(request, handler):
         safe_emails = []
 
         for email in emails:
-            print("\n" + "-" * 70)
-            print(f"📧 Inspecting email: {email['id']}")
-            print(f"From: {email['sender']}")
-            print(f"Subject: {email['subject']}")
+            with start_span("agent_jail.email") as email_span:
+                email_span.set_attribute("security.email_id", email["id"])
+                email_span.set_attribute("security.source", "Gmail")
+                print("\n" + "-" * 70)
+                print(f"📧 Inspecting email: {email['id']}")
+                print(f"From: {email['sender']}")
+                print(f"Subject: {email['subject']}")
 
-            email_content = untrusted_content(
-                content=email["body"],
-                source="Gmail",
-                source_type="email",
-                metadata={
-                    "tool": "get_emails",
-                    "email_id": email["id"],
-                },
-            )
+                email_content = untrusted_content(
+                    content=email["body"],
+                    source="Gmail",
+                    source_type="email",
+                    metadata={
+                        "tool": "get_emails",
+                        "email_id": email["id"],
+                    },
+                )
 
-            security_context.add_tainted_content(email_content)
+                security_context.add_tainted_content(email_content)
 
-            print("\n🚨 CONTENT TAINTED")
-            print(f"Trust:   {email_content.trust_level.value.upper()}")
-            print(f"Tainted: {email_content.is_tainted}")
+                print("\n🚨 CONTENT TAINTED")
+                print(f"Trust:   {email_content.trust_level.value.upper()}")
+                print(f"Tainted: {email_content.is_tainted}")
 
-            print("\n🔎 MOSS SCAN")
+                print("\n🔎 MOSS SCAN")
 
-            scan_result = asyncio.run(
-                scan_tainted_content(email_content, top_k=5)
-            )
+                scan_result = asyncio.run(
+                    scan_tainted_content(email_content, top_k=5)
+                )
 
-            results, latency_ms = scan_result
-            threats = parse_moss_results(results)
+                results, latency_ms = scan_result
+                threats = parse_moss_results(results)
 
-            print("\n🧠 THREAT EVIDENCE")
-            for threat in threats:
-                print(
-                    f"{threat['id']} | "
-                    f"{threat['category']} | "
-                    f"{threat['score']:.4f}"
-    )
+                # ========================================================
+                # GEMINI — INTENT & CONTEXT ANALYSIS
+                # ========================================================
 
-            print(f"Moss latency: {latency_ms:.2f} ms")
+                print("\n🧠 GEMINI INTENT ANALYSIS")
 
-            decision = evaluate_policy(
-                tainted=True,
-                threat_matches=threats,
-                requested_action=None,
-            )
+                intent_analysis = analyze_intent(email["body"])
 
-            top_threat = (
-                max(threats, key=lambda threat: threat["score"])
-                if threats
-                else None
-            )
+                print(f"Agent directed:         {intent_analysis.agent_directed}")
+                print(f"Instruction override:   {intent_analysis.instruction_override}")
+                print(f"Privileged action:      {intent_analysis.requests_privileged_action}")
+                print(f"Sensitive data request: {intent_analysis.sensitive_data_request}")
+                print(f"Manipulates agent:      {intent_analysis.manipulates_agent_behavior}")
+                print(f"Confidence:             {intent_analysis.confidence:.2f}")
+                print(f"Reason:                 {intent_analysis.reason}")
 
-            emit_live_event(
-                "POLICY_DECISION",
-                {
-                    "source": email["sender"],
-                    "email_id": email["id"],
-                    "subject": email["subject"],
-                    "decision": decision.decision.value.upper(),
-                    "risk": decision.risk.value.upper(),
-                    "category": (
-                        top_threat["category"]
-                        if top_threat
-                        else "none"
-                    ),
-                    "score": (
-                        top_threat["score"]
-                        if top_threat
-                        else 0
-                    ),
-                    "latency_ms": latency_ms,
-                    "threat_count": len(threats),
-                },
-            )
+                print("\n🧠 THREAT EVIDENCE")
+                for threat in threats:
+                    print(
+                        f"{threat['id']} | "
+                        f"{threat['category']} | "
+                        f"{threat['score']:.4f}"
+                )
 
-            security_context.add_content_result(
-                content=email_content,
-                threat_matches=threats,
-                decision=decision,
-            )
-            print("\n🛡️ POLICY DECISION")
-            print(f"Decision: {decision.decision.value.upper()}")
-            print(f"Risk:     {decision.risk.value.upper()}")
+                print(f"Moss latency: {latency_ms:.2f} ms")
 
-            if decision.decision.value == "quarantine":
+                decision = evaluate_policy(
+                    tainted=True,
+                    threat_matches=threats,
+                    requested_action=None,
+                    intent_analysis=intent_analysis,
+                )
+
+                top_threat = (
+                    max(threats, key=lambda threat: threat["score"])
+                    if threats
+                    else None
+                )
+
                 emit_live_event(
-                    "THREAT_DETECTED",
+                    "POLICY_DECISION",
                     {
-                        "source": "Gmail",
+                        "source": email["sender"],
                         "email_id": email["id"],
                         "subject": email["subject"],
+                        "decision": decision.decision.value.upper(),
+                        "risk": decision.risk.value.upper(),
                         "category": (
                             top_threat["category"]
                             if top_threat
-                            else "unknown"
+                            else "none"
                         ),
                         "score": (
                             top_threat["score"]
                             if top_threat
                             else 0
                         ),
-                        "risk": decision.risk.value.upper(),
                         "latency_ms": latency_ms,
+                        "threat_count": len(threats),
                     },
                 )
-                print("\n🔒 AGENT JAIL — CONTENT QUARANTINED")
 
-                security_context.quarantine_vault.quarantine(
+                security_context.add_content_result(
                     content=email_content,
+                    threat_matches=threats,
                     decision=decision,
-                    requested_action=None,
                 )
+                print("\n🛡️ POLICY DECISION")
+                print(f"Decision: {decision.decision.value.upper()}")
+                print(f"Risk:     {decision.risk.value.upper()}")
 
-                print(
-                    f"Vault items: "
-                    f"{len(security_context.quarantine_vault.list_items())}"
-                )
-                security_context.quarantine_content(email_content)
-                emit_live_event(
-                    "CONTENT_QUARANTINED",
-                    {
-                        "source": "Gmail",
-                        "email_id": email["id"],
-                        "decision": "QUARANTINE",
-                        "risk": decision.risk.value.upper(),
-                        "reason": decision.reason,
-                    },
-                )
-                print(f"Email {email['id']} isolated from agent.")
+                if decision.decision.value in {"quarantine", "block"}:
+                    emit_live_event(
+                        "THREAT_DETECTED",
+                        {
+                            "source": "Gmail",
+                            "email_id": email["id"],
+                            "subject": email["subject"],
+                            "category": (
+                                top_threat["category"]
+                                if top_threat
+                                else "unknown"
+                            ),
+                            "score": (
+                                top_threat["score"]
+                                if top_threat
+                                else 0
+                            ),
+                            "risk": decision.risk.value.upper(),
+                            "latency_ms": latency_ms,
+                        },
+                    )
+                    print("\n🔒 AGENT JAIL — CONTENT QUARANTINED")
 
-            else:
-                safe_emails.append(email)
+                    security_context.quarantine_vault.quarantine(
+                        content=email_content,
+                        decision=decision,
+                        requested_action=None,
+                    )
+
+                    print(
+                        f"Vault items: "
+                        f"{len(security_context.quarantine_vault.list_items())}"
+                    )
+                    security_context.quarantine_content(email_content)
+                    emit_live_event(
+                        "CONTENT_QUARANTINED",
+                        {
+                            "source": "Gmail",
+                            "email_id": email["id"],
+                            "decision": "QUARANTINE",
+                            "risk": decision.risk.value.upper(),
+                            "reason": decision.reason,
+                        },
+                    )
+                    print(f"Email {email['id']} isolated from agent.")
+
+                else:
+                    safe_emails.append(email)
 
         print("\n" + "=" * 70)
         print("📨 SAFE CONTENT RETURNED TO AGENT")

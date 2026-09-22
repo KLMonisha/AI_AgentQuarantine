@@ -4,7 +4,7 @@ from typing import Any
 
 from taint import TaintedContent
 from policy import PolicyDecision
-
+from telemetry import start_span
 
 class QuarantineStatus:
     QUARANTINED = "quarantined"
@@ -33,26 +33,53 @@ class QuarantineVault:
         self._counter = 0
 
     def quarantine(
-        self,
-        content: TaintedContent,
-        decision: PolicyDecision,
-        requested_action: str | None = None,
-    ) -> QuarantineItem:
+    self,
+    content: TaintedContent,
+    decision: PolicyDecision,
+    requested_action: str | None = None,
+) -> QuarantineItem:
 
-        self._counter += 1
+        with start_span("quarantine.store") as span:
+            span.set_attribute(
+                "quarantine.source",
+                content.source,
+            )
+            span.set_attribute(
+                "quarantine.source_type",
+                content.source_type,
+            )
+            span.set_attribute(
+                "quarantine.decision",
+                decision.decision.value,
+            )
+            span.set_attribute(
+                "quarantine.risk",
+                decision.risk.value,
+            )
 
-        item_id = f"AJ-Q-{self._counter:04d}"
+            self._counter += 1
 
-        item = QuarantineItem(
-            id=item_id,
-            content=content,
-            decision=decision,
-            requested_action=requested_action,
-        )
+            item_id = f"AJ-Q-{self._counter:04d}"
 
-        self.items[item_id] = item
+            item = QuarantineItem(
+                id=item_id,
+                content=content,
+                decision=decision,
+                requested_action=requested_action,
+            )
 
-        return item
+            self.items[item_id] = item
+
+            span.set_attribute(
+                "quarantine.item_id",
+                item_id,
+            )
+            span.set_attribute(
+                "quarantine.vault_size",
+                len(self.items),
+            )
+
+            return item
 
     def get(self, item_id: str) -> QuarantineItem | None:
         return self.items.get(item_id)
