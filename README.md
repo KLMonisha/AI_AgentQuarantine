@@ -56,9 +56,9 @@ Gemini analyzes whether the content is attempting to address or manipulate an AI
 Deterministic Policy Engine
 Moss and Gemini provide security evidence. The final decision is made by a deterministic policy engine rather than by an LLM.
 Containment
-ALLOW — content can proceed to the agent.
-QUARANTINE — suspicious content is isolated in the Quarantine Vault.
-BLOCK — the requested action is prevented and the content is isolated.
+ALLOW: content can proceed to the agent.
+QUARANTINE: suspicious content is isolated in the Quarantine Vault.
+BLOCK: the requested action is prevented and the content is isolated.
 Observability
 OpenTelemetry provides correlated traces across email ingestion, Moss scanning, Gemini analysis, policy evaluation, and quarantine operations.
 Key Features
@@ -153,7 +153,7 @@ Agent Jail creates a security boundary between what an agent reads and what an a
 
 Detect. Contain. Continue.
 
-## AI-Assisted Development
+#### AI-Assisted Development
 
 AI tools were used throughout the development process as development and research assistants.
 
