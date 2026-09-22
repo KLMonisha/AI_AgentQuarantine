@@ -59,8 +59,10 @@ Containment
 ALLOW: content can proceed to the agent.
 QUARANTINE: suspicious content is isolated in the Quarantine Vault.
 BLOCK: the requested action is prevented and the content is isolated.
+
 Observability
 OpenTelemetry provides correlated traces across email ingestion, Moss scanning, Gemini analysis, policy evaluation, and quarantine operations.
+
 Key Features
 Indirect prompt injection detection
 Taint and provenance tracking
@@ -74,19 +76,20 @@ LiveKit real-time security events
 Next.js security dashboard
 OpenTelemetry tracing
 Local Gemini result caching for reliable demo replay
+
 Technology Stack
 Component	Technology
-Threat Intelligence	Moss
-Intent Analysis	Gemini
+Threat Intelligence	:Moss
+Intent Analysis	:Gemini
 Agent / LLM	Groq
-Agent Framework	LangChain
-Email Source	Gmail API
-Real-time Events	LiveKit
-Dashboard	Next.js, TypeScript, Tailwind CSS
-Observability	OpenTelemetry
-Language	Python
-Demo
+Agent Framework	:LangChain
+Email Source	:Gmail API
+Real-time Events	:LiveKit
+Dashboard	:Next.js, TypeScript, Tailwind CSS
+Observability	:OpenTelemetry
+Language	:Python
 
+Demo
 Agent Jail was tested against a controlled set of five Gmail messages containing benign, ambiguous, and indirect prompt-injection scenarios.
 
 Scenario	Decision	Risk
