@@ -1,14 +1,14 @@
 import json
+import os
 
 from langchain.tools import tool
 
+from gmail_client import get_emails as get_gmail_emails
 
-@tool
-def get_emails() -> str:
+
+def get_mock_emails():
     """
-    Retrieve emails from a mock Gmail inbox.
-
-    This simulates an external untrusted data source.
+    Return synthetic emails for testing and offline development.
     """
 
     emails = [
@@ -43,4 +43,23 @@ def get_emails() -> str:
         },
     ]
 
-    return json.dumps(emails)
+    return emails
+
+
+@tool
+def get_emails() -> str:
+    """
+    Retrieve emails from the configured email source.
+
+    By default, Agent Jail uses synthetic emails for testing.
+    Set EMAIL_SOURCE=gmail to use the connected Gmail account.
+    """
+
+    source = os.getenv("EMAIL_SOURCE", "mock").lower()
+
+    if source == "gmail":
+        emails = get_gmail_emails()
+    else:
+        emails = get_mock_emails()
+
+    return json.dumps(emails, ensure_ascii=False)

@@ -88,11 +88,6 @@ async def main():
         latency_ms = (end_time - start_time) * 1000
 
         print(f"Moss query latency: {latency_ms:.2f} ms")
-        results = await client.query(
-            INDEX_NAME,
-            test["text"],
-            QueryOptions(top_k=5)
-        )
 
 
         # --------------------------------------------------

@@ -54,6 +54,18 @@ class SecurityContext:
             )
         )
 
+    def active_threats(self) -> list[dict]:
+        threats = []
+
+        for item in self.content_results:
+            if item.content in self.quarantined_content:
+                continue
+
+            if item.decision and item.decision.decision.value != "allow":
+                threats.extend(item.threat_matches)
+
+        return threats
+
     def add_tainted_content(
         self,
         content: TaintedContent,
@@ -96,6 +108,30 @@ class SecurityContext:
         self.quarantined_content.clear()
         self.threat_matches.clear()
 
+    def has_active_threat(self) -> bool:
+        return len(self.active_threats()) > 0
+
+    def active_risk_level(self):
+        risks = [
+            item.decision.risk
+            for item in self.content_results
+            if item.content not in self.quarantined_content
+            and item.decision
+            and item.decision.decision.value != "allow"
+        ]
+
+        if not risks:
+            return None
+
+        priority = {
+            "low": 1,
+            "medium": 2,
+            "high": 3,
+            "critical": 4,
+        }
+
+        return max(risks, key=lambda r: priority[r.value])
+
     def summary(self):
         """
         Return a simple representation useful for logging/debugging.
@@ -109,5 +145,8 @@ class SecurityContext:
             ],
             "quarantined_count": len(
                 self.quarantined_content
+            ),
+            "active_threat_count": len(
+                self.active_threats()
             ),
         }

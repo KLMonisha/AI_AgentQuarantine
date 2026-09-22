@@ -2,9 +2,9 @@ import asyncio
 import json
 from quarantine import QuarantineVault
 from email_tools import get_emails
+import security_context
 from taint import untrusted_content
 from security_scan import scan_tainted_content
-from threat_parser import parse_moss_results
 from dotenv import load_dotenv
 from policy import evaluate_policy
 from langchain.agents import create_agent
@@ -13,11 +13,25 @@ from langchain.messages import ToolMessage
 from langchain.tools import tool
 from langchain_groq import ChatGroq
 from security_context import SecurityContext
-from taint import untrusted_content
-from security_scan import scan_tainted_content
 from threat_parser import parse_moss_results
+from livekit_events import publish_security_event
 
 load_dotenv()
+
+def emit_live_event(event_type: str, data: dict):
+    """
+    Send a security event to the LiveKit dashboard.
+    LiveKit failure must never interrupt Agent Jail enforcement.
+    """
+    try:
+        asyncio.run(
+            publish_security_event(
+                event_type,
+                data,
+            )
+        )
+    except Exception as error:
+        print(f"[LiveKit] Event publish failed: {error}")
 
 # ============================================================
 # MOCK EMAIL TOOL
@@ -120,6 +134,35 @@ def agent_jail(request, handler):
                 requested_action=None,
             )
 
+            top_threat = (
+                max(threats, key=lambda threat: threat["score"])
+                if threats
+                else None
+            )
+
+            emit_live_event(
+                "POLICY_DECISION",
+                {
+                    "source": email["sender"],
+                    "email_id": email["id"],
+                    "subject": email["subject"],
+                    "decision": decision.decision.value.upper(),
+                    "risk": decision.risk.value.upper(),
+                    "category": (
+                        top_threat["category"]
+                        if top_threat
+                        else "none"
+                    ),
+                    "score": (
+                        top_threat["score"]
+                        if top_threat
+                        else 0
+                    ),
+                    "latency_ms": latency_ms,
+                    "threat_count": len(threats),
+                },
+            )
+
             security_context.add_content_result(
                 content=email_content,
                 threat_matches=threats,
@@ -130,6 +173,26 @@ def agent_jail(request, handler):
             print(f"Risk:     {decision.risk.value.upper()}")
 
             if decision.decision.value == "quarantine":
+                emit_live_event(
+                    "THREAT_DETECTED",
+                    {
+                        "source": "Gmail",
+                        "email_id": email["id"],
+                        "subject": email["subject"],
+                        "category": (
+                            top_threat["category"]
+                            if top_threat
+                            else "unknown"
+                        ),
+                        "score": (
+                            top_threat["score"]
+                            if top_threat
+                            else 0
+                        ),
+                        "risk": decision.risk.value.upper(),
+                        "latency_ms": latency_ms,
+                    },
+                )
                 print("\n🔒 AGENT JAIL — CONTENT QUARANTINED")
 
                 security_context.quarantine_vault.quarantine(
@@ -143,7 +206,16 @@ def agent_jail(request, handler):
                     f"{len(security_context.quarantine_vault.list_items())}"
                 )
                 security_context.quarantine_content(email_content)
-
+                emit_live_event(
+                    "CONTENT_QUARANTINED",
+                    {
+                        "source": "Gmail",
+                        "email_id": email["id"],
+                        "decision": "QUARANTINE",
+                        "risk": decision.risk.value.upper(),
+                        "reason": decision.reason,
+                    },
+                )
                 print(f"Email {email['id']} isolated from agent.")
 
             else:
@@ -177,12 +249,12 @@ def agent_jail(request, handler):
     # ========================================================
 
     tainted = security_context.tainted
-    threat_matches = security_context.threat_matches
+    threat_matches = security_context.active_threats()
 
     print("\n🛡️ SECURITY CONTEXT")
     print(f"Tainted:        {tainted}")
     print(f"Tainted items:  {len(security_context.tainted_content)}")
-    print(f"Threat matches: {len(threat_matches)}")
+    print(f"Active threats: {len(threat_matches)}")
 
     # ========================================================
     # POLICY
@@ -256,6 +328,17 @@ agent = create_agent(
     tools=[get_emails, send_email],
     middleware=[agent_jail],
     context_schema=SecurityContext,
+    system_prompt=(
+        "You are a careful assistant operating inside Agent Jail. "
+        "When summarizing information returned by tools, preserve "
+        "all factual values exactly as provided. "
+        "Never change currencies, amounts, dates, invoice numbers, "
+        "names, or identifiers. "
+        "If a value contains the Indian Rupee symbol (₹), preserve it "
+        "as ₹. Do not convert currencies. "
+        "Use only information present in the tool results and do not "
+        "invent or infer missing values."
+    ),
 )
 
 
